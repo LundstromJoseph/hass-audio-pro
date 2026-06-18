@@ -133,15 +133,17 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
         data = self.coordinator.data
         if not data or not data.slave_ips:
             return []
+        from homeassistant.helpers import entity_registry as er
+        registry = er.async_get(self.hass)
         result = []
         for entry_id, coord in self.hass.data.get(DOMAIN, {}).items():
             if entry_id == self._entry.entry_id:
                 continue
-            if hasattr(coord, "api") and coord.api._host in data.slave_ips:
-                # Find the entity registered for this coordinator
-                for entity in self.platform.entities.values():
-                    if hasattr(entity, "coordinator") and entity.coordinator is coord:
-                        result.append(entity.entity_id)
+            if not (hasattr(coord, "api") and coord.api._host in data.slave_ips):
+                continue
+            entries = er.async_entries_for_config_entry(registry, entry_id)
+            for reg_entry in entries:
+                result.append(reg_entry.entity_id)
         return result
 
     async def async_media_play(self) -> None:

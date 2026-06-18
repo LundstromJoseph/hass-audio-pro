@@ -11,7 +11,7 @@ UPNP_RC_SERVICE = "urn:schemas-upnp-org:service:RenderingControl:1"
 
 CONF_HOST = "host"
 
-# getStatusEx group field values
+# getStatusEx group field values (Arylic firmware: 0=solo, 1=slave, 2=master)
 GROUP_SOLO = "0"
-GROUP_MASTER = "1"
-GROUP_SLAVE = "2"
+GROUP_SLAVE = "1"
+GROUP_MASTER = "2"
