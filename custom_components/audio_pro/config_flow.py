@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.components.ssdp import SsdpServiceInfo
-from homeassistant.components.zeroconf import ZeroconfServiceInfo
 from homeassistant.data_entry_flow import FlowResult
 
 from .api import AudioProClient
 from .cert import create_ssl_context
 from .const import CONF_HOST, DOMAIN
+
+if TYPE_CHECKING:
+    from homeassistant.components.ssdp import SsdpServiceInfo
+    from homeassistant.components.zeroconf import ZeroconfServiceInfo
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,26 +51,24 @@ class AudioProConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_ssdp(self, discovery_info: SsdpServiceInfo) -> FlowResult:
-        # ssdp_location is the UPnP description URL, e.g. http://10.0.0.130:49152/description.xml
-        from urllib.parse import urlparse
-        location = str(discovery_info.ssdp_location or "")
+    async def async_step_ssdp(self, discovery_info: Any) -> FlowResult:
+        location = str(getattr(discovery_info, "ssdp_location", "") or "")
         if not location:
             return self.async_abort(reason="no_host")
-        parsed = urlparse(location)
-        host = parsed.hostname
+        host = urlparse(location).hostname
         if not host:
             return self.async_abort(reason="no_host")
         return await self._handle_discovery(host)
 
-    async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo) -> FlowResult:
-        host = str(discovery_info.host)
+    async def async_step_zeroconf(self, discovery_info: Any) -> FlowResult:
+        host = str(getattr(discovery_info, "host", "") or "")
+        if not host:
+            return self.async_abort(reason="no_host")
         return await self._handle_discovery(host)
 
     async def _handle_discovery(self, host: str) -> FlowResult:
         name, err = await self._try_connect(host)
         if err:
-            # Not reachable on :4443 with mTLS — not an Audio Pro device
             return self.async_abort(reason="cannot_connect")
 
         await self.async_set_unique_id(host)
@@ -92,7 +93,6 @@ class AudioProConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def _try_connect(self, host: str) -> tuple[str | None, str | None]:
-        """Return (device_name, error_key). error_key is None on success."""
         try:
             ssl_ctx = create_ssl_context()
             async with aiohttp.ClientSession() as session:
