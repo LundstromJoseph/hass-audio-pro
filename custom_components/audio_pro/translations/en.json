@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Audio Pro device",
+        "data": {
+          "host": "IP address"
+        }
+      },
+      "discovery_confirm": {
+        "title": "Discovered Audio Pro device",
+        "description": "Do you want to add {name}?"
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to device. Check the IP address.",
+      "unknown": "Unexpected error. Check the logs."
+    },
+    "abort": {
+      "already_configured": "Device is already configured.",
+      "cannot_connect": "Cannot connect to device.",
+      "no_host": "Could not determine device host."
+    }
+  }
+}
