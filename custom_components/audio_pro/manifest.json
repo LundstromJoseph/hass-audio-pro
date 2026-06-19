@@ -1,7 +1,7 @@
 {
   "domain": "audio_pro",
   "name": "Audio Pro",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "config_flow": true,
   "documentation": "https://github.com/josephgodwinkimani/hass-audio-pro",
   "issue_tracker": "https://github.com/josephgodwinkimani/hass-audio-pro/issues",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.components.media_player import (
@@ -11,11 +12,20 @@ from homeassistant.components.media_player import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, GROUP_SLAVE
+from .const import (
+    DOMAIN,
+    GROUP_RETRY_ATTEMPTS,
+    GROUP_RETRY_DELAY,
+    GROUP_SLAVE,
+    ROLE_MASTER,
+    ROLE_SLAVE,
+    ROLE_SOLO,
+)
 from .coordinator import AudioProCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -78,7 +88,10 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
         data = self.coordinator.data
         if data is None:
             return {}
-        return {"raw_group": data.group, "master_ip": data.master_ip, "slave_ips": data.slave_ips}
+        return {
+            "multiroom_role": data.role,
+            "group_master": self._group_master_entity_id(),
+        }
 
     @property
     def volume_level(self) -> float | None:
@@ -130,31 +143,51 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
         return _parse_upnp_time(self.coordinator.data.track.position)
 
     @property
-    def group_members(self) -> list[str] | None:
+    def group_members(self) -> list[str]:
+        """All entities in this device's group, master first; empty when solo.
+
+        Reported identically by the master and its slaves so the standard HA
+        grouping model works for any consumer (cards, automations, the join UI).
+        """
         data = self.coordinator.data
-        if data is None or data.group == GROUP_SLAVE:
-            return None
-        slave_ids = self._slave_entity_ids()
-        if not slave_ids:
-            return None  # solo
-        return [self.entity_id] + slave_ids
+        if data is None:
+            return []
+        if data.role == ROLE_MASTER:
+            return [self.entity_id] + self._slave_entity_ids()
+        if data.role == ROLE_SLAVE:
+            return self._slave_view_of_group()
+        return []  # solo
 
     def _slave_entity_ids(self) -> list[str]:
+        """Entity ids of this (master) device's slaves."""
         data = self.coordinator.data
-        if not data or not data.slave_ips:
+        if not data:
             return []
-        from homeassistant.helpers import entity_registry as er
-        registry = er.async_get(self.hass)
-        result = []
-        for entry_id, coord in self.hass.data.get(DOMAIN, {}).items():
-            if entry_id == self._entry.entry_id:
-                continue
-            if not (hasattr(coord, "api") and coord.api._host in data.slave_ips):
-                continue
-            entries = er.async_entries_for_config_entry(registry, entry_id)
-            for reg_entry in entries:
-                result.append(reg_entry.entity_id)
-        return result
+        return _entity_ids_for_hosts(self.hass, data.slave_ips)
+
+    def _slave_view_of_group(self) -> list[str]:
+        """Full member list as seen from this slave's master (master first)."""
+        data = self.coordinator.data
+        if not data or not data.master_ip:
+            return []
+        master_coord, master_entity_id = _coord_and_entity_for_host(self.hass, data.master_ip)
+        if not master_coord or not master_entity_id:
+            return []
+        master_data = master_coord.data
+        slave_hosts = master_data.slave_ips if master_data else []
+        return [master_entity_id] + _entity_ids_for_hosts(self.hass, slave_hosts)
+
+    def _group_master_entity_id(self) -> str | None:
+        """Entity id of this group's master, or None when solo."""
+        data = self.coordinator.data
+        if data is None:
+            return None
+        if data.role == ROLE_MASTER:
+            return self.entity_id
+        if data.role == ROLE_SLAVE and data.master_ip:
+            _, master_entity_id = _coord_and_entity_for_host(self.hass, data.master_ip)
+            return master_entity_id
+        return None
 
     async def async_media_play(self) -> None:
         await self.coordinator.api.set_player_cmd("play")
@@ -196,33 +229,92 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
         await self.coordinator.async_request_refresh()
 
     async def async_join_players(self, group_members: list[str]) -> None:
-        """Make this device the master; join listed entities as slaves."""
-        # group_members is a list of entity_ids that should follow this master
-        for entity_id in group_members:
-            slave_coord = _coord_for_entity(self.hass, entity_id)
-            if slave_coord is not None:
-                await slave_coord.api.join_group(self.coordinator.api._host)
-        await self.coordinator.async_request_refresh()
+        """Make this device the master; join listed entities as slaves.
+
+        Arylic join is unreliable, so re-issue and verify until every requested
+        member has joined (or the attempts run out).
+        """
+        targets = [e for e in group_members if e != self.entity_id]
+        if not targets:
+            return
+        for _ in range(GROUP_RETRY_ATTEMPTS):
+            for entity_id in targets:
+                slave_coord = _coord_for_entity(self.hass, entity_id)
+                if slave_coord is not None:
+                    try:
+                        await slave_coord.api.join_group(self.coordinator.api._host)
+                    except Exception as err:
+                        _LOGGER.debug("join_group failed for %s: %s", entity_id, err)
+            await asyncio.sleep(GROUP_RETRY_DELAY)
+            await self.coordinator.async_request_refresh()
+            if set(targets).issubset(self._slave_entity_ids()):
+                return
+        _LOGGER.warning(
+            "Audio Pro: group around %s did not fully form after %d attempts",
+            self.entity_id,
+            GROUP_RETRY_ATTEMPTS,
+        )
 
     async def async_unjoin_player(self) -> None:
-        await self.coordinator.api.unjoin()
-        await self.coordinator.async_request_refresh()
+        """Leave (slave) or dissolve (master) the group, verifying until settled."""
+        data = self.coordinator.data
+        slave_coords: list[AudioProCoordinator] = []
+        if data and data.role == ROLE_MASTER:
+            for host in data.slave_ips:
+                coord, _ = _coord_and_entity_for_host(self.hass, host)
+                if coord is not None:
+                    slave_coords.append(coord)
+        for _ in range(GROUP_RETRY_ATTEMPTS):
+            for coord in (self.coordinator, *slave_coords):
+                try:
+                    await coord.api.unjoin()
+                except Exception as err:
+                    _LOGGER.debug("unjoin failed for %s: %s", coord.api._host, err)
+            await asyncio.sleep(GROUP_RETRY_DELAY)
+            await self.coordinator.async_request_refresh()
+            for coord in slave_coords:
+                await coord.async_request_refresh()
+            if self.coordinator.data and self.coordinator.data.role == ROLE_SOLO:
+                return
+        _LOGGER.warning(
+            "Audio Pro: %s did not leave its group after %d attempts",
+            self.entity_id,
+            GROUP_RETRY_ATTEMPTS,
+        )
 
 
 def _coord_for_entity(hass: HomeAssistant, entity_id: str) -> AudioProCoordinator | None:
-    """Find the coordinator for a given entity_id in the DOMAIN."""
-    for coord in hass.data.get(DOMAIN, {}).values():
-        if not isinstance(coord, AudioProCoordinator):
+    """Find the Audio Pro coordinator backing a given entity_id."""
+    registry = er.async_get(hass)
+    reg_entry = registry.async_get(entity_id)
+    if reg_entry is None or reg_entry.config_entry_id is None:
+        return None
+    coord = hass.data.get(DOMAIN, {}).get(reg_entry.config_entry_id)
+    return coord if isinstance(coord, AudioProCoordinator) else None
+
+
+def _coord_and_entity_for_host(
+    hass: HomeAssistant, host: str
+) -> tuple[AudioProCoordinator | None, str | None]:
+    """Return the (coordinator, media_player entity_id) for the device at `host`."""
+    registry = er.async_get(hass)
+    for entry_id, coord in hass.data.get(DOMAIN, {}).items():
+        if not isinstance(coord, AudioProCoordinator) or coord.api._host != host:
             continue
-        # Look through entity registry / platform entities to match
-        entity_registry = hass.data.get("entity_registry")
-        if entity_registry:
-            entry = entity_registry.async_get(entity_id)
-            if entry and entry.config_entry_id in hass.data.get(DOMAIN, {}):
-                candidate = hass.data[DOMAIN][entry.config_entry_id]
-                if isinstance(candidate, AudioProCoordinator):
-                    return candidate
-    return None
+        for reg_entry in er.async_entries_for_config_entry(registry, entry_id):
+            if reg_entry.entity_id.startswith("media_player."):
+                return coord, reg_entry.entity_id
+    return None, None
+
+
+def _entity_ids_for_hosts(hass: HomeAssistant, hosts: list[str]) -> list[str]:
+    """Map device hosts/IPs to their media_player entity ids."""
+    result: list[str] = []
+    for host in hosts or []:
+        _, entity_id = _coord_and_entity_for_host(hass, host)
+        if entity_id:
+            result.append(entity_id)
+    return result
 
 
 def _parse_upnp_time(time_str: str | None) -> float | None:

@@ -13,3 +13,12 @@ CONF_HOST = "host"
 
 # getStatusEx group field values (Arylic firmware: 0=master/solo, 1=slave)
 GROUP_SLAVE = "1"
+
+# Multiroom roles, exposed as the `multiroom_role` attribute
+ROLE_SOLO = "solo"
+ROLE_MASTER = "master"
+ROLE_SLAVE = "slave"
+
+# Arylic join/unjoin is flaky — re-issue and verify until the group settles
+GROUP_RETRY_ATTEMPTS = 5
+GROUP_RETRY_DELAY = 2  # seconds between attempts

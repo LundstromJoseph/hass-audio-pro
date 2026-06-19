@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import AudioProClient, DeviceStatus
-from .const import DEFAULT_SCAN_INTERVAL
+from .const import DEFAULT_SCAN_INTERVAL, GROUP_SLAVE, ROLE_MASTER, ROLE_SLAVE, ROLE_SOLO
 from .upnp import TrackInfo, UPnPClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +30,15 @@ class AudioProState:
     track: TrackInfo = field(default_factory=TrackInfo)
     volume: int = 0
     muted: bool = False
+
+    @property
+    def role(self) -> str:
+        """Multiroom role: solo, master, or slave."""
+        if self.group == GROUP_SLAVE:
+            return ROLE_SLAVE
+        if self.slave_ips:
+            return ROLE_MASTER
+        return ROLE_SOLO
 
 
 class AudioProCoordinator(DataUpdateCoordinator[AudioProState]):
