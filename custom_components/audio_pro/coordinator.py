@@ -61,7 +61,7 @@ class AudioProCoordinator(DataUpdateCoordinator[AudioProState]):
             raise UpdateFailed(f"Error communicating with Audio Pro device: {err}") from err
 
         slave_ips: list[str] = []
-        if status.group == "2":  # GROUP_MASTER
+        if status.group != "1":  # not a slave — fetch slave list (empty if solo)
             try:
                 slave_ips = await self.api.get_slave_list()
             except Exception:

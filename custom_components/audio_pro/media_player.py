@@ -15,7 +15,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, GROUP_MASTER, GROUP_SLAVE, GROUP_SOLO
+from .const import DOMAIN, GROUP_SLAVE
 from .coordinator import AudioProCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -74,6 +74,13 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
         return _TRANSPORT_TO_STATE.get(data.transport_state, MediaPlayerState.IDLE)
 
     @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        return {"raw_group": data.group, "master_ip": data.master_ip, "slave_ips": data.slave_ips}
+
+    @property
     def volume_level(self) -> float | None:
         if self.coordinator.data is None:
             return None
@@ -105,9 +112,10 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
 
     @property
     def media_image_url(self) -> str | None:
-        if self.coordinator.data is None:
+        data = self.coordinator.data
+        if data is None or data.group == GROUP_SLAVE:
             return None
-        return self.coordinator.data.track.art_url
+        return data.track.art_url
 
     @property
     def media_duration(self) -> float | None:
@@ -124,10 +132,12 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
     @property
     def group_members(self) -> list[str] | None:
         data = self.coordinator.data
-        if data is None or data.group != GROUP_MASTER:
+        if data is None or data.group == GROUP_SLAVE:
             return None
-        # Return entity_ids of slaves (best-effort: match by IP from other entries)
-        return self._slave_entity_ids()
+        slave_ids = self._slave_entity_ids()
+        if not slave_ids:
+            return None  # solo
+        return [self.entity_id] + slave_ids
 
     def _slave_entity_ids(self) -> list[str]:
         data = self.coordinator.data
@@ -167,7 +177,18 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
         await self.coordinator.async_request_refresh()
 
     async def async_set_volume_level(self, volume: float) -> None:
-        await self.coordinator.upnp.set_volume(round(volume * 100))
+        vol_int = round(volume * 100)
+        await self.coordinator.upnp.set_volume(vol_int)
+        data = self.coordinator.data
+        if data and data.group != GROUP_SLAVE and data.slave_ips:
+            for entry_id, coord in self.hass.data.get(DOMAIN, {}).items():
+                if entry_id == self._entry.entry_id:
+                    continue
+                if hasattr(coord, "api") and coord.api._host in data.slave_ips:
+                    try:
+                        await coord.upnp.set_volume(vol_int)
+                    except Exception:
+                        pass
         await self.coordinator.async_request_refresh()
 
     async def async_mute_volume(self, mute: bool) -> None:

@@ -180,7 +180,7 @@ def _parse_didl(didl_xml: str, info: TrackInfo) -> TrackInfo:
 
     # albumArtURI is in upnp namespace
     art = item.find("{urn:schemas-upnp-org:metadata-1-0/upnp/}albumArtURI")
-    if art is not None:
+    if art is not None and art.text and art.text not in ("un_known", "unknown", ""):
         info.art_url = art.text
 
     return info
