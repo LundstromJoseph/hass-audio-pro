@@ -78,3 +78,6 @@ class AudioProClient:
 
     async def set_player_cmd(self, cmd: str) -> None:
         await self._get(f"setPlayerCmd:{cmd}")
+
+    async def set_device_name(self, name: str) -> None:
+        await self._get(f"setDeviceName:{name}")

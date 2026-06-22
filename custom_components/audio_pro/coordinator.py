@@ -8,10 +8,11 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import AudioProClient, DeviceStatus
-from .const import DEFAULT_SCAN_INTERVAL, GROUP_SLAVE, ROLE_MASTER, ROLE_SLAVE, ROLE_SOLO
+from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, GROUP_SLAVE, ROLE_MASTER, ROLE_SLAVE, ROLE_SOLO
 from .upnp import TrackInfo, UPnPClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class AudioProCoordinator(DataUpdateCoordinator[AudioProState]):
         hass: HomeAssistant,
         api: AudioProClient,
         upnp: UPnPClient,
+        entry_id: str,
     ) -> None:
         super().__init__(
             hass,
@@ -56,8 +58,25 @@ class AudioProCoordinator(DataUpdateCoordinator[AudioProState]):
         )
         self.api = api
         self.upnp = upnp
+        self._store: Store = Store(hass, 1, f"{DOMAIN}.device_name.{entry_id}")
+        self._store_loaded = False
+        self._original_name: str | None = None
+
+    async def save_original_name(self, name: str) -> None:
+        self._original_name = name
+        await self._store.async_save(name)
+
+    async def restore_original_name(self) -> str | None:
+        name = self._original_name
+        self._original_name = None
+        await self._store.async_remove()
+        return name
 
     async def _async_update_data(self) -> AudioProState:
+        if not self._store_loaded:
+            self._store_loaded = True
+            self._original_name = await self._store.async_load()
+
         try:
             status, transport, track, volume, muted = await asyncio.gather(
                 self.api.get_status(),
@@ -76,7 +95,7 @@ class AudioProCoordinator(DataUpdateCoordinator[AudioProState]):
             except Exception:
                 pass
 
-        return AudioProState(
+        state = AudioProState(
             device_name=status.device_name,
             uuid=status.uuid,
             group=status.group,
@@ -87,3 +106,16 @@ class AudioProCoordinator(DataUpdateCoordinator[AudioProState]):
             volume=volume,
             muted=muted,
         )
+
+        # Recovery: restore the original name if the device is solo but was renamed for a group
+        if self._original_name and state.role == ROLE_SOLO:
+            try:
+                await self.api.set_device_name(self._original_name)
+                state.device_name = self._original_name
+            except Exception:
+                _LOGGER.warning("audio_pro: failed to restore device name to %r", self._original_name)
+            else:
+                self._original_name = None
+                await self._store.async_remove()
+
+        return state
