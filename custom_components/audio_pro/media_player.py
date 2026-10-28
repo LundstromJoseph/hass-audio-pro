@@ -238,14 +238,6 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
         if not targets:
             return
 
-        data = self.coordinator.data
-        if data and not self.coordinator._original_name:
-            await self.coordinator.save_original_name(data.device_name)
-            try:
-                await self.coordinator.api.set_device_name("Group")
-            except Exception as err:
-                _LOGGER.warning("audio_pro: failed to rename device for group: %s", err)
-
         for _ in range(GROUP_RETRY_ATTEMPTS):
             for entity_id in targets:
                 slave_coord = _coord_for_entity(self.hass, entity_id)
@@ -285,13 +277,6 @@ class AudioProMediaPlayer(CoordinatorEntity[AudioProCoordinator], MediaPlayerEnt
             for coord in slave_coords:
                 await coord.async_request_refresh()
             if self.coordinator.data and self.coordinator.data.role == ROLE_SOLO:
-                if is_master:
-                    original = await self.coordinator.restore_original_name()
-                    if original:
-                        try:
-                            await self.coordinator.api.set_device_name(original)
-                        except Exception as err:
-                            _LOGGER.warning("audio_pro: failed to restore device name: %s", err)
                 return
         _LOGGER.warning(
             "Audio Pro: %s did not leave its group after %d attempts",
